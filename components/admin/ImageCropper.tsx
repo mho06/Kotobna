@@ -22,15 +22,21 @@ export default function ImageCropper(props: Props) {
   const imgRef = useRef<HTMLImageElement>(null);
   const [currentSrc, setCurrentSrc] = useState(imageSrc);
   const [box, setBox] = useState({ x1: 8, y1: 8, x2: 92, y2: 92 });
+  const [imgLoaded, setImgLoaded] = useState(false);
   const dragHandle = useRef<Handle | null>(null);
   const dragStart = useRef({ x: 0, y: 0, box: { x1: 0, y1: 0, x2: 0, y2: 0 } });
 
   useEffect(function () {
     setBox({ x1: 8, y1: 8, x2: 92, y2: 92 });
+    setImgLoaded(false);
   }, [currentSrc]);
 
+  // Always measure against the actual <img> element's own rendered box,
+  // never the wrapping container. If the wrapper's box ever differs from
+  // the image's real box for any reason, using the image directly removes
+  // that entire class of bug instead of trying to keep them in sync.
   function getRelativePos(clientX: number, clientY: number) {
-    const el = wrapRef.current;
+    const el = imgRef.current;
     if (!el) return { x: 0, y: 0 };
     const rect = el.getBoundingClientRect();
     const x = ((clientX - rect.left) / rect.width) * 100;
@@ -136,16 +142,20 @@ export default function ImageCropper(props: Props) {
     const naturalH = img.naturalHeight;
     const activeBox = useFullFrame ? { x1: 0, y1: 0, x2: 100, y2: 100 } : box;
 
-    const sx = (activeBox.x1 / 100) * naturalW;
-    const sy = (activeBox.y1 / 100) * naturalH;
-    const sw = ((activeBox.x2 - activeBox.x1) / 100) * naturalW;
-    const sh = ((activeBox.y2 - activeBox.y1) / 100) * naturalH;
+    const sx = Math.round((activeBox.x1 / 100) * naturalW);
+    const sy = Math.round((activeBox.y1 / 100) * naturalH);
+    const sw = Math.round(((activeBox.x2 - activeBox.x1) / 100) * naturalW);
+    const sh = Math.round(((activeBox.y2 - activeBox.y1) / 100) * naturalH);
 
     const canvas = document.createElement("canvas");
     canvas.width = sw;
     canvas.height = sh;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
+    // Explicit 8-argument drawImage: source rect (sx,sy,sw,sh) mapped 1:1
+    // onto a destination canvas of the exact same size - a plain pixel
+    // copy with no scaling, so there is no way for this step to distort
+    // the aspect ratio.
     ctx.drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
 
     onConfirm(resizeIfNeeded(canvas));
@@ -199,6 +209,7 @@ export default function ImageCropper(props: Props) {
           src={currentSrc}
           alt="Crop preview"
           draggable={false}
+          onLoad={function () { setImgLoaded(true); }}
           style={{
             maxWidth: "100%",
             maxHeight: "420px",
@@ -208,110 +219,84 @@ export default function ImageCropper(props: Props) {
           }}
         />
 
-        <div
-          className="absolute inset-0 pointer-events-none"
-          style={{
-            background:
-              "linear-gradient(to right, rgba(51,38,33,0.5) " +
-              box.x1 +
-              "%, transparent " +
-              box.x1 +
-              "%, transparent " +
-              box.x2 +
-              "%, rgba(51,38,33,0.5) " +
-              box.x2 +
-              "%), linear-gradient(to bottom, rgba(51,38,33,0.5) " +
-              box.y1 +
-              "%, transparent " +
-              box.y1 +
-              "%, transparent " +
-              box.y2 +
-              "%, rgba(51,38,33,0.5) " +
-              box.y2 +
-              "%)",
-          }}
-        />
-
-        <div
-          onPointerDown={function (e) {
-            startDrag("move", e);
-          }}
-          className="absolute border-2 border-oxblood cursor-move touch-none"
-          style={{
-            left: box.x1 + "%",
-            top: box.y1 + "%",
-            width: box.x2 - box.x1 + "%",
-            height: box.y2 - box.y1 + "%",
-          }}
-        />
-
-        {edgeHandles.map(function (h) {
-          return (
+        {imgLoaded && (
+          <>
             <div
-              key={h.key}
-              onPointerDown={function (e) {
-                startDrag(h.key, e);
+              className="absolute inset-0 pointer-events-none"
+              style={{
+                background:
+                  "linear-gradient(to right, rgba(43,38,32,0.5) " +
+                  box.x1 +
+                  "%, transparent " +
+                  box.x1 +
+                  "%, transparent " +
+                  box.x2 +
+                  "%, rgba(43,38,32,0.5) " +
+                  box.x2 +
+                  "%), linear-gradient(to bottom, rgba(43,38,32,0.5) " +
+                  box.y1 +
+                  "%, transparent " +
+                  box.y1 +
+                  "%, transparent " +
+                  box.y2 +
+                  "%, rgba(43,38,32,0.5) " +
+                  box.y2 +
+                  "%)",
               }}
-              className="absolute w-9 h-9 -ml-4.5 -mt-4.5 touch-none"
-              style={Object.assign({ cursor: h.cursor }, h.style)}
             />
-          );
-        })}
 
-        {cornerHandles.map(function (c) {
-          return (
             <div
-              key={c.key}
-              onPointerDown={function (e) {
-                startDrag(c.key, e);
+              onPointerDown={function (e) { startDrag("move", e); }}
+              className="absolute border-2 border-forest cursor-move touch-none"
+              style={{
+                left: box.x1 + "%",
+                top: box.y1 + "%",
+                width: box.x2 - box.x1 + "%",
+                height: box.y2 - box.y1 + "%",
               }}
-              className="absolute w-11 h-11 -ml-5.5 -mt-5.5 cursor-pointer touch-none flex items-center justify-center"
-              style={c.style}
-            >
-              <div className="w-5 h-5 bg-oxblood border-2 border-parchment rounded-full pointer-events-none" />
-            </div>
-          );
-        })}
+            />
+
+            {edgeHandles.map(function (h) {
+              return (
+                <div
+                  key={h.key}
+                  onPointerDown={function (e) { startDrag(h.key, e); }}
+                  className="absolute w-9 h-9 -ml-4.5 -mt-4.5 touch-none"
+                  style={Object.assign({ cursor: h.cursor }, h.style)}
+                />
+              );
+            })}
+
+            {cornerHandles.map(function (c) {
+              return (
+                <div
+                  key={c.key}
+                  onPointerDown={function (e) { startDrag(c.key, e); }}
+                  className="absolute w-11 h-11 -ml-5.5 -mt-5.5 cursor-pointer touch-none flex items-center justify-center"
+                  style={c.style}
+                >
+                  <div className="w-5 h-5 bg-forest border-2 border-cream rounded-full pointer-events-none" />
+                </div>
+              );
+            })}
+          </>
+        )}
       </div>
 
       <div className="flex gap-3 flex-wrap">
-        <button
-          type="button"
-          onClick={function () {
-            rotateImage(-1);
-          }}
-          className="font-mono text-[11px] uppercase tracking-widest border border-ink/30 text-ink/70 px-4 py-2 hover:border-ink transition-colors"
-        >
+        <button type="button" onClick={function () { rotateImage(-1); }} className="font-mono text-[11px] uppercase tracking-widest border border-ink/25 text-ink/70 rounded-full px-4 py-2 hover:border-ink transition-colors">
           Rotate left
         </button>
-        <button
-          type="button"
-          onClick={function () {
-            rotateImage(1);
-          }}
-          className="font-mono text-[11px] uppercase tracking-widest border border-ink/30 text-ink/70 px-4 py-2 hover:border-ink transition-colors"
-        >
+        <button type="button" onClick={function () { rotateImage(1); }} className="font-mono text-[11px] uppercase tracking-widest border border-ink/25 text-ink/70 rounded-full px-4 py-2 hover:border-ink transition-colors">
           Rotate right
         </button>
-        <button
-          type="button"
-          onClick={handleReset}
-          className="font-mono text-[11px] uppercase tracking-widest border border-ink/30 text-ink/70 px-4 py-2 hover:border-ink transition-colors"
-        >
+        <button type="button" onClick={handleReset} className="font-mono text-[11px] uppercase tracking-widest border border-ink/25 text-ink/70 rounded-full px-4 py-2 hover:border-ink transition-colors">
           Reset
         </button>
-        <button
-          type="button"
-          onClick={handleConfirm}
-          className="font-mono text-[11px] uppercase tracking-widest bg-oxblood text-parchment px-4 py-2 hover:opacity-90 transition-opacity"
-        >
+        <button type="button" onClick={handleConfirm} className="font-mono text-[11px] uppercase tracking-widest bg-forest text-cream rounded-full px-4 py-2 hover:bg-forest-dark transition-colors">
           Confirm crop
         </button>
-        <button
-          type="button"
-          onClick={handleSkip}
-          className="font-mono text-[11px] uppercase tracking-widest border border-ink/30 text-ink/70 px-4 py-2 hover:border-ink transition-colors"
-        >
+        <button type="button" onClick={handleSkip} className="font-mono text-[11px] uppercase tracking-widest border border-ink/25 text-ink/70 rounded-full px-4 py-2 hover:border-ink transition-colors">
           Use full photo
         </button>
       </div>
