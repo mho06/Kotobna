@@ -49,6 +49,19 @@ export default function ImageCropper(props: Props) {
 
   function startDrag(handle: Handle, e: React.PointerEvent) {
     e.stopPropagation();
+    e.preventDefault();
+    // Explicitly capture the pointer to the element the drag started on.
+    // Without this, a fast or long touch-drag on mobile can drift off the
+    // small handle and silently stop firing move events, making it feel
+    // like dragging "doesn't work" past a certain point.
+    const target = e.currentTarget as HTMLElement;
+    if (target.setPointerCapture) {
+      try {
+        target.setPointerCapture(e.pointerId);
+      } catch (err) {
+        // Some browsers can throw if the pointer is already gone; safe to ignore.
+      }
+    }
     const pos = getRelativePos(e.clientX, e.clientY);
     dragHandle.current = handle;
     dragStart.current = {
