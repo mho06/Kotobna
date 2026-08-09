@@ -26,9 +26,9 @@ export default function AdminPage() {
   if (!password) return <AdminLogin onSuccess={setPassword} />;
 
   return (
-    <main className="px-5 sm:px-8 py-8 max-w-4xl mx-auto">
-      <div className="flex items-center justify-between mb-6">
-        <h1 className="font-display text-3xl font-semibold">Admin</h1>
+    <main className="px-4 sm:px-8 py-6 sm:py-8 max-w-4xl mx-auto">
+      <div className="flex items-center justify-between flex-wrap gap-3 mb-6">
+        <h1 className="font-display text-2xl sm:text-3xl font-semibold">Admin</h1>
         <div className="flex items-center gap-4">
           <a href="/" target="_blank" rel="noopener noreferrer" className="font-mono text-[10px] uppercase tracking-widest text-ink/50 hover:text-forest transition-colors">
             View live site

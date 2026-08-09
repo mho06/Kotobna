@@ -16,7 +16,7 @@ export default function BookCard(props: { book: Book }) {
 
   return (
     <div className="bg-card border border-ink/10 rounded-card overflow-hidden shadow-[0_2px_10px_-4px_rgba(43,38,32,0.15)] hover:shadow-[0_10px_24px_-8px_rgba(43,38,32,0.25)] hover:-translate-y-1 transition-all">
-      <div className="tilt-wrapper aspect-[3/4] w-full relative" onClick={handleFlip}>
+      <div className="tilt-wrapper aspect-[3/4] w-full relative bg-cream-dark" onClick={handleFlip}>
         <div className={"flip-card " + (flipped ? "is-flipped" : "")}>
           <div className="flip-card-face flip-card-front overflow-hidden">
             {book.front_image_url ? (
@@ -25,8 +25,8 @@ export default function BookCard(props: { book: Book }) {
                 alt={book.title}
                 fill
                 draggable={false}
-                className="object-cover"
-                sizes="(max-width: 768px) 50vw, 25vw"
+                className="object-contain"
+                sizes="(max-width: 768px) 90vw, 25vw"
               />
             ) : (
               <div className="w-full h-full flex items-center justify-center bg-cream-dark text-ink/40 font-display text-sm">
@@ -41,14 +41,14 @@ export default function BookCard(props: { book: Book }) {
                 alt={book.title + " back cover"}
                 fill
                 draggable={false}
-                className="object-cover"
-                sizes="(max-width: 768px) 50vw, 25vw"
+                className="object-contain"
+                sizes="(max-width: 768px) 90vw, 25vw"
               />
             </div>
           )}
         </div>
         {book.genre && (
-          <span className="absolute top-2 left-2 bg-forest text-cream font-mono text-[9px] uppercase tracking-widest px-2 py-1 rounded-full">
+          <span className="absolute top-2 left-2 bg-forest text-cream font-mono text-[9px] uppercase tracking-widest px-2 py-1 rounded-full pointer-events-none">
             {book.genre}
           </span>
         )}
@@ -59,10 +59,7 @@ export default function BookCard(props: { book: Book }) {
           {book.title}
         </h3>
         {book.author && (
-          <p className="text-xs text-ink/60 mb-2">{book.author}</p>
-        )}
-        {book.description && (
-          <p className="text-sm text-ink/75 leading-snug mb-3">{book.description}</p>
+          <p className="text-xs text-ink/60 mb-3">{book.author}</p>
         )}
 
         <div className="flex items-center justify-between gap-2 mt-2">
