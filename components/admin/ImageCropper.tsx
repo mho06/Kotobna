@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState, useEffect } from "react";
+import { useRef, useState, useEffect, useCallback } from "react";
 
 interface Props {
   imageSrc: string;
@@ -8,126 +8,111 @@ interface Props {
   onSkip: () => void;
 }
 
-type Handle = "tl" | "tr" | "bl" | "br" | "t" | "b" | "l" | "r" | "move";
+// Fixed aspect ratio matching the book cover shape used everywhere else
+// (BookCard.tsx uses aspect-[3/4]). Locking the crop to this ratio means
+// whatever gets selected here is guaranteed to match how it's displayed
+// later - no more mismatch between "what I cropped" and "what shows up".
+const RATIO_W = 3;
+const RATIO_H = 4;
 
 const MAX_DIMENSION = 1600;
 const JPEG_QUALITY = 0.82;
-const MIN_SIZE = 8;
 
 export default function ImageCropper(props: Props) {
   const imageSrc = props.imageSrc;
   const onConfirm = props.onConfirm;
 
-  const wrapRef = useRef<HTMLDivElement>(null);
   const imgRef = useRef<HTMLImageElement>(null);
-  const [currentSrc, setCurrentSrc] = useState(imageSrc);
-  const [box, setBox] = useState({ x1: 8, y1: 8, x2: 92, y2: 92 });
   const [imgLoaded, setImgLoaded] = useState(false);
-  const dragHandle = useRef<Handle | null>(null);
-  const dragStart = useRef({ x: 0, y: 0, box: { x1: 0, y1: 0, x2: 0, y2: 0 } });
+  const [rendered, setRendered] = useState({ width: 0, height: 0 });
 
-  useEffect(function () {
-    setBox({ x1: 8, y1: 8, x2: 92, y2: 92 });
-    setImgLoaded(false);
-  }, [currentSrc]);
+  // Crop box lives in the SAME pixel space as the rendered <img> - no
+  // percentages, no separate container to keep in sync. One coordinate
+  // system end to end removes an entire class of measurement bugs.
+  const [box, setBox] = useState({ x: 0, y: 0, w: 0, h: 0 });
 
-  // Always measure against the actual <img> element's own rendered box,
-  // never the wrapping container. If the wrapper's box ever differs from
-  // the image's real box for any reason, using the image directly removes
-  // that entire class of bug instead of trying to keep them in sync.
-  function getRelativePos(clientX: number, clientY: number) {
-    const el = imgRef.current;
-    if (!el) return { x: 0, y: 0 };
-    const rect = el.getBoundingClientRect();
-    const x = ((clientX - rect.left) / rect.width) * 100;
-    const y = ((clientY - rect.top) / rect.height) * 100;
-    return {
-      x: Math.min(100, Math.max(0, x)),
-      y: Math.min(100, Math.max(0, y)),
-    };
+  const dragging = useRef<null | "move" | "resize">(null);
+  const dragStart = useRef({ px: 0, py: 0, box: { x: 0, y: 0, w: 0, h: 0 } });
+
+  const fitInitialBox = useCallback(function (width: number, height: number) {
+    let w = width;
+    let h = (w * RATIO_H) / RATIO_W;
+    if (h > height) {
+      h = height;
+      w = (h * RATIO_W) / RATIO_H;
+    }
+    // Start slightly inset so there's visible margin to drag inward from.
+    w = w * 0.85;
+    h = h * 0.85;
+    const x = (width - w) / 2;
+    const y = (height - h) / 2;
+    setBox({ x: x, y: y, w: w, h: h });
+  }, []);
+
+  function handleImgLoad() {
+    const img = imgRef.current;
+    if (!img) return;
+    const rect = img.getBoundingClientRect();
+    setRendered({ width: rect.width, height: rect.height });
+    fitInitialBox(rect.width, rect.height);
+    setImgLoaded(true);
   }
 
-  function startDrag(handle: Handle, e: React.PointerEvent) {
+  useEffect(function () {
+    setImgLoaded(false);
+  }, [imageSrc]);
+
+  function clampBox(next: { x: number; y: number; w: number; h: number }) {
+    let w = Math.min(next.w, rendered.width);
+    let h = (w * RATIO_H) / RATIO_W;
+    if (h > rendered.height) {
+      h = rendered.height;
+      w = (h * RATIO_W) / RATIO_H;
+    }
+    let x = Math.min(Math.max(0, next.x), rendered.width - w);
+    let y = Math.min(Math.max(0, next.y), rendered.height - h);
+    return { x: x, y: y, w: w, h: h };
+  }
+
+  function startMove(e: React.PointerEvent) {
     e.stopPropagation();
     e.preventDefault();
-    // Explicitly capture the pointer to the element the drag started on.
-    // Without this, a fast or long touch-drag on mobile can drift off the
-    // small handle and silently stop firing move events, making it feel
-    // like dragging "doesn't work" past a certain point.
     const target = e.currentTarget as HTMLElement;
     if (target.setPointerCapture) {
-      try {
-        target.setPointerCapture(e.pointerId);
-      } catch (err) {
-        // Some browsers can throw if the pointer is already gone; safe to ignore.
-      }
+      try { target.setPointerCapture(e.pointerId); } catch (err) {}
     }
-    const pos = getRelativePos(e.clientX, e.clientY);
-    dragHandle.current = handle;
-    dragStart.current = {
-      x: pos.x,
-      y: pos.y,
-      box: { x1: box.x1, y1: box.y1, x2: box.x2, y2: box.y2 },
-    };
+    dragging.current = "move";
+    dragStart.current = { px: e.clientX, py: e.clientY, box: box };
+  }
+
+  function startResize(e: React.PointerEvent) {
+    e.stopPropagation();
+    e.preventDefault();
+    const target = e.currentTarget as HTMLElement;
+    if (target.setPointerCapture) {
+      try { target.setPointerCapture(e.pointerId); } catch (err) {}
+    }
+    dragging.current = "resize";
+    dragStart.current = { px: e.clientX, py: e.clientY, box: box };
   }
 
   function handlePointerMove(e: React.PointerEvent) {
-    if (!dragHandle.current) return;
-    const pos = getRelativePos(e.clientX, e.clientY);
-    const dx = pos.x - dragStart.current.x;
-    const dy = pos.y - dragStart.current.y;
+    if (!dragging.current) return;
+    const dx = e.clientX - dragStart.current.px;
+    const dy = e.clientY - dragStart.current.py;
     const start = dragStart.current.box;
-    const handle = dragHandle.current;
 
-    setBox(function () {
-      let x1 = start.x1;
-      let y1 = start.y1;
-      let x2 = start.x2;
-      let y2 = start.y2;
-
-      if (handle === "move") {
-        const w = start.x2 - start.x1;
-        const h = start.y2 - start.y1;
-        x1 = Math.min(Math.max(0, start.x1 + dx), 100 - w);
-        y1 = Math.min(Math.max(0, start.y1 + dy), 100 - h);
-        x2 = x1 + w;
-        y2 = y1 + h;
-        return { x1: x1, y1: y1, x2: x2, y2: y2 };
-      }
-
-      if (handle === "tl" || handle === "l" || handle === "bl") {
-        x1 = Math.min(Math.max(0, start.x1 + dx), start.x2 - MIN_SIZE);
-      }
-      if (handle === "tr" || handle === "r" || handle === "br") {
-        x2 = Math.max(Math.min(100, start.x2 + dx), start.x1 + MIN_SIZE);
-      }
-      if (handle === "tl" || handle === "t" || handle === "tr") {
-        y1 = Math.min(Math.max(0, start.y1 + dy), start.y2 - MIN_SIZE);
-      }
-      if (handle === "bl" || handle === "b" || handle === "br") {
-        y2 = Math.max(Math.min(100, start.y2 + dy), start.y1 + MIN_SIZE);
-      }
-
-      return { x1: x1, y1: y1, x2: x2, y2: y2 };
-    });
+    if (dragging.current === "move") {
+      setBox(clampBox({ x: start.x + dx, y: start.y + dy, w: start.w, h: start.h }));
+    } else {
+      // Resize from the bottom-right corner; width drives height via the fixed ratio.
+      const newW = start.w + dx;
+      setBox(clampBox({ x: start.x, y: start.y, w: newW, h: (newW * RATIO_H) / RATIO_W }));
+    }
   }
 
   function handlePointerUp() {
-    dragHandle.current = null;
-  }
-
-  function rotateImage(direction: number) {
-    const img = imgRef.current;
-    if (!img) return;
-    const canvas = document.createElement("canvas");
-    canvas.width = img.naturalHeight;
-    canvas.height = img.naturalWidth;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    ctx.translate(canvas.width / 2, canvas.height / 2);
-    ctx.rotate((direction * 90 * Math.PI) / 180);
-    ctx.drawImage(img, -img.naturalWidth / 2, -img.naturalHeight / 2);
-    setCurrentSrc(canvas.toDataURL("image/jpeg", 0.95));
+    dragging.current = null;
   }
 
   function resizeIfNeeded(sourceCanvas: HTMLCanvasElement) {
@@ -149,26 +134,33 @@ export default function ImageCropper(props: Props) {
 
   function exportCrop(useFullFrame: boolean) {
     const img = imgRef.current;
-    if (!img) return;
+    if (!img || rendered.width === 0) return;
 
     const naturalW = img.naturalWidth;
     const naturalH = img.naturalHeight;
-    const activeBox = useFullFrame ? { x1: 0, y1: 0, x2: 100, y2: 100 } : box;
+    const scale = naturalW / rendered.width;
 
-    const sx = Math.round((activeBox.x1 / 100) * naturalW);
-    const sy = Math.round((activeBox.y1 / 100) * naturalH);
-    const sw = Math.round(((activeBox.x2 - activeBox.x1) / 100) * naturalW);
-    const sh = Math.round(((activeBox.y2 - activeBox.y1) / 100) * naturalH);
+    let cropBox = box;
+    if (useFullFrame) {
+      let w = rendered.width;
+      let h = (w * RATIO_H) / RATIO_W;
+      if (h > rendered.height) {
+        h = rendered.height;
+        w = (h * RATIO_W) / RATIO_H;
+      }
+      cropBox = { x: (rendered.width - w) / 2, y: (rendered.height - h) / 2, w: w, h: h };
+    }
+
+    const sx = Math.round(cropBox.x * scale);
+    const sy = Math.round(cropBox.y * scale);
+    const sw = Math.round(cropBox.w * scale);
+    const sh = Math.round(cropBox.h * scale);
 
     const canvas = document.createElement("canvas");
     canvas.width = sw;
     canvas.height = sh;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-    // Explicit 8-argument drawImage: source rect (sx,sy,sw,sh) mapped 1:1
-    // onto a destination canvas of the exact same size - a plain pixel
-    // copy with no scaling, so there is no way for this step to distort
-    // the aspect ratio.
     ctx.drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
 
     onConfirm(resizeIfNeeded(canvas));
@@ -183,34 +175,16 @@ export default function ImageCropper(props: Props) {
   }
 
   function handleReset() {
-    setBox({ x1: 0, y1: 0, x2: 100, y2: 100 });
+    fitInitialBox(rendered.width, rendered.height);
   }
-
-  const midX = (box.x1 + box.x2) / 2;
-  const midY = (box.y1 + box.y2) / 2;
-
-  const cornerHandles: { key: Handle; style: React.CSSProperties }[] = [
-    { key: "tl", style: { left: box.x1 + "%", top: box.y1 + "%" } },
-    { key: "tr", style: { left: box.x2 + "%", top: box.y1 + "%" } },
-    { key: "bl", style: { left: box.x1 + "%", top: box.y2 + "%" } },
-    { key: "br", style: { left: box.x2 + "%", top: box.y2 + "%" } },
-  ];
-
-  const edgeHandles: { key: Handle; style: React.CSSProperties; cursor: string }[] = [
-    { key: "t", style: { left: midX + "%", top: box.y1 + "%" }, cursor: "ns-resize" },
-    { key: "b", style: { left: midX + "%", top: box.y2 + "%" }, cursor: "ns-resize" },
-    { key: "l", style: { left: box.x1 + "%", top: midY + "%" }, cursor: "ew-resize" },
-    { key: "r", style: { left: box.x2 + "%", top: midY + "%" }, cursor: "ew-resize" },
-  ];
 
   return (
     <div className="flex flex-col gap-4">
       <p className="text-xs text-ink/60 -mb-1">
-        Drag the corners or edges to resize, or drag inside the box to move it.
+        Drag inside the box to move it, or drag the corner handle to resize. The shape is locked to match how covers are displayed.
       </p>
 
       <div
-        ref={wrapRef}
         className="relative select-none touch-none inline-block max-w-full"
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
@@ -219,10 +193,10 @@ export default function ImageCropper(props: Props) {
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
           ref={imgRef}
-          src={currentSrc}
+          src={imageSrc}
           alt="Crop preview"
           draggable={false}
-          onLoad={function () { setImgLoaded(true); }}
+          onLoad={handleImgLoad}
           style={{
             maxWidth: "100%",
             maxHeight: "420px",
@@ -237,72 +211,50 @@ export default function ImageCropper(props: Props) {
             <div
               className="absolute inset-0 pointer-events-none"
               style={{
-                background:
-                  "linear-gradient(to right, rgba(43,38,32,0.5) " +
-                  box.x1 +
-                  "%, transparent " +
-                  box.x1 +
-                  "%, transparent " +
-                  box.x2 +
-                  "%, rgba(43,38,32,0.5) " +
-                  box.x2 +
-                  "%), linear-gradient(to bottom, rgba(43,38,32,0.5) " +
-                  box.y1 +
-                  "%, transparent " +
-                  box.y1 +
-                  "%, transparent " +
-                  box.y2 +
-                  "%, rgba(43,38,32,0.5) " +
-                  box.y2 +
-                  "%)",
+                background: "rgba(43,38,32,0.5)",
+                clipPath:
+                  "polygon(0% 0%, 0% 100%, " +
+                  box.x +
+                  "px 100%, " +
+                  box.x +
+                  "px " +
+                  box.y +
+                  "px, " +
+                  (box.x + box.w) +
+                  "px " +
+                  box.y +
+                  "px, " +
+                  (box.x + box.w) +
+                  "px " +
+                  (box.y + box.h) +
+                  "px, " +
+                  box.x +
+                  "px " +
+                  (box.y + box.h) +
+                  "px, " +
+                  box.x +
+                  "px 100%, 100% 100%, 100% 0%)",
               }}
             />
 
             <div
-              onPointerDown={function (e) { startDrag("move", e); }}
+              onPointerDown={startMove}
               className="absolute border-2 border-forest cursor-move touch-none"
-              style={{
-                left: box.x1 + "%",
-                top: box.y1 + "%",
-                width: box.x2 - box.x1 + "%",
-                height: box.y2 - box.y1 + "%",
-              }}
+              style={{ left: box.x, top: box.y, width: box.w, height: box.h }}
             />
 
-            {edgeHandles.map(function (h) {
-              return (
-                <div
-                  key={h.key}
-                  onPointerDown={function (e) { startDrag(h.key, e); }}
-                  className="absolute w-9 h-9 -ml-4.5 -mt-4.5 touch-none"
-                  style={Object.assign({ cursor: h.cursor }, h.style)}
-                />
-              );
-            })}
-
-            {cornerHandles.map(function (c) {
-              return (
-                <div
-                  key={c.key}
-                  onPointerDown={function (e) { startDrag(c.key, e); }}
-                  className="absolute w-11 h-11 -ml-5.5 -mt-5.5 cursor-pointer touch-none flex items-center justify-center"
-                  style={c.style}
-                >
-                  <div className="w-5 h-5 bg-forest border-2 border-cream rounded-full pointer-events-none" />
-                </div>
-              );
-            })}
+            <div
+              onPointerDown={startResize}
+              className="absolute w-11 h-11 -ml-5.5 -mt-5.5 cursor-nwse-resize touch-none flex items-center justify-center"
+              style={{ left: box.x + box.w, top: box.y + box.h }}
+            >
+              <div className="w-5 h-5 bg-forest border-2 border-cream rounded-full pointer-events-none" />
+            </div>
           </>
         )}
       </div>
 
       <div className="flex gap-3 flex-wrap">
-        <button type="button" onClick={function () { rotateImage(-1); }} className="font-mono text-[11px] uppercase tracking-widest border border-ink/25 text-ink/70 rounded-full px-4 py-2 hover:border-ink transition-colors">
-          Rotate left
-        </button>
-        <button type="button" onClick={function () { rotateImage(1); }} className="font-mono text-[11px] uppercase tracking-widest border border-ink/25 text-ink/70 rounded-full px-4 py-2 hover:border-ink transition-colors">
-          Rotate right
-        </button>
         <button type="button" onClick={handleReset} className="font-mono text-[11px] uppercase tracking-widest border border-ink/25 text-ink/70 rounded-full px-4 py-2 hover:border-ink transition-colors">
           Reset
         </button>
