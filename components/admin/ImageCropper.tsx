@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState, useEffect, useCallback } from "react";
+import { useRef, useState, useCallback } from "react";
 
 interface Props {
   imageSrc: string;
@@ -8,13 +8,14 @@ interface Props {
   onSkip: () => void;
 }
 
-// Fixed aspect ratio matching the book cover shape used everywhere else
-// (BookCard.tsx uses aspect-[3/4]). Locking the crop to this ratio means
-// whatever gets selected here is guaranteed to match how it's displayed
-// later - no more mismatch between "what I cropped" and "what shows up".
+// Fixed frame, matching how covers are displayed elsewhere (aspect-[3/4]).
+// Instead of dragging small resize handles, the person drags the PHOTO
+// underneath a stationary frame and pinches to zoom - the standard mobile
+// crop pattern (Instagram, WhatsApp profile photos, etc.) rather than a
+// custom handle-based tool.
 const RATIO_W = 3;
 const RATIO_H = 4;
-
+const MAX_ZOOM = 3;
 const MAX_DIMENSION = 1600;
 const JPEG_QUALITY = 0.82;
 
@@ -22,97 +23,152 @@ export default function ImageCropper(props: Props) {
   const imageSrc = props.imageSrc;
   const onConfirm = props.onConfirm;
 
+  const viewportRef = useRef<HTMLDivElement>(null);
   const imgRef = useRef<HTMLImageElement>(null);
-  const [imgLoaded, setImgLoaded] = useState(false);
-  const [rendered, setRendered] = useState({ width: 0, height: 0 });
 
-  // Crop box lives in the SAME pixel space as the rendered <img> - no
-  // percentages, no separate container to keep in sync. One coordinate
-  // system end to end removes an entire class of measurement bugs.
-  const [box, setBox] = useState({ x: 0, y: 0, w: 0, h: 0 });
+  const [viewport, setViewport] = useState({ width: 0, height: 0 });
+  const [natural, setNatural] = useState({ width: 0, height: 0 });
+  const [zoom, setZoom] = useState(1);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const [ready, setReady] = useState(false);
 
-  const dragging = useRef<null | "move" | "resize">(null);
-  const dragStart = useRef({ px: 0, py: 0, box: { x: 0, y: 0, w: 0, h: 0 } });
+  const pointers = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const gestureStart = useRef({
+    zoom: 1,
+    offset: { x: 0, y: 0 },
+    dist: 0,
+    midpoint: { x: 0, y: 0 },
+  });
 
-  const fitInitialBox = useCallback(function (width: number, height: number) {
-    let w = width;
-    let h = (w * RATIO_H) / RATIO_W;
-    if (h > height) {
-      h = height;
-      w = (h * RATIO_W) / RATIO_H;
-    }
-    // Start slightly inset so there's visible margin to drag inward from.
-    w = w * 0.85;
-    h = h * 0.85;
-    const x = (width - w) / 2;
-    const y = (height - h) / 2;
-    setBox({ x: x, y: y, w: w, h: h });
+  function coverScale(vw: number, vh: number, nw: number, nh: number) {
+    if (nw === 0 || nh === 0) return 1;
+    return Math.max(vw / nw, vh / nh);
+  }
+
+  function clampOffset(nextOffset: { x: number; y: number }, currentZoom: number) {
+    const base = coverScale(viewport.width, viewport.height, natural.width, natural.height);
+    const renderScale = base * currentZoom;
+    const displayW = natural.width * renderScale;
+    const displayH = natural.height * renderScale;
+    const minX = viewport.width - displayW;
+    const minY = viewport.height - displayH;
+    return {
+      x: Math.min(0, Math.max(minX, nextOffset.x)),
+      y: Math.min(0, Math.max(minY, nextOffset.y)),
+    };
+  }
+
+  const measureViewport = useCallback(function () {
+    const el = viewportRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    setViewport({ width: rect.width, height: rect.height });
   }, []);
 
   function handleImgLoad() {
     const img = imgRef.current;
     if (!img) return;
-    const rect = img.getBoundingClientRect();
-    setRendered({ width: rect.width, height: rect.height });
-    fitInitialBox(rect.width, rect.height);
-    setImgLoaded(true);
+    measureViewport();
+    setNatural({ width: img.naturalWidth, height: img.naturalHeight });
+    setZoom(1);
+    setOffset({ x: 0, y: 0 });
+    setReady(true);
   }
 
-  useEffect(function () {
-    setImgLoaded(false);
-  }, [imageSrc]);
-
-  function clampBox(next: { x: number; y: number; w: number; h: number }) {
-    let w = Math.min(next.w, rendered.width);
-    let h = (w * RATIO_H) / RATIO_W;
-    if (h > rendered.height) {
-      h = rendered.height;
-      w = (h * RATIO_W) / RATIO_H;
-    }
-    let x = Math.min(Math.max(0, next.x), rendered.width - w);
-    let y = Math.min(Math.max(0, next.y), rendered.height - h);
-    return { x: x, y: y, w: w, h: h };
+  // Re-center whenever we first know both viewport and image size.
+  const centered = useRef(false);
+  if (ready && viewport.width > 0 && natural.width > 0 && !centered.current) {
+    centered.current = true;
+    const base = coverScale(viewport.width, viewport.height, natural.width, natural.height);
+    const displayW = natural.width * base;
+    const displayH = natural.height * base;
+    setOffset({ x: (viewport.width - displayW) / 2, y: (viewport.height - displayH) / 2 });
   }
 
-  function startMove(e: React.PointerEvent) {
-    e.stopPropagation();
+  function dist(a: { x: number; y: number }, b: { x: number; y: number }) {
+    return Math.sqrt(Math.pow(a.x - b.x, 2) + Math.pow(a.y - b.y, 2));
+  }
+
+  function midpoint(a: { x: number; y: number }, b: { x: number; y: number }) {
+    return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+  }
+
+  function handlePointerDown(e: React.PointerEvent) {
     e.preventDefault();
     const target = e.currentTarget as HTMLElement;
     if (target.setPointerCapture) {
       try { target.setPointerCapture(e.pointerId); } catch (err) {}
     }
-    dragging.current = "move";
-    dragStart.current = { px: e.clientX, py: e.clientY, box: box };
-  }
+    pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
 
-  function startResize(e: React.PointerEvent) {
-    e.stopPropagation();
-    e.preventDefault();
-    const target = e.currentTarget as HTMLElement;
-    if (target.setPointerCapture) {
-      try { target.setPointerCapture(e.pointerId); } catch (err) {}
+    if (pointers.current.size === 2) {
+      const pts = Array.from(pointers.current.values());
+      gestureStart.current = {
+        zoom: zoom,
+        offset: offset,
+        dist: dist(pts[0], pts[1]),
+        midpoint: midpoint(pts[0], pts[1]),
+      };
+    } else {
+      gestureStart.current = {
+        zoom: zoom,
+        offset: offset,
+        dist: 0,
+        midpoint: { x: e.clientX, y: e.clientY },
+      };
     }
-    dragging.current = "resize";
-    dragStart.current = { px: e.clientX, py: e.clientY, box: box };
   }
 
   function handlePointerMove(e: React.PointerEvent) {
-    if (!dragging.current) return;
-    const dx = e.clientX - dragStart.current.px;
-    const dy = e.clientY - dragStart.current.py;
-    const start = dragStart.current.box;
+    if (!pointers.current.has(e.pointerId)) return;
+    pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
 
-    if (dragging.current === "move") {
-      setBox(clampBox({ x: start.x + dx, y: start.y + dy, w: start.w, h: start.h }));
-    } else {
-      // Resize from the bottom-right corner; width drives height via the fixed ratio.
-      const newW = start.w + dx;
-      setBox(clampBox({ x: start.x, y: start.y, w: newW, h: (newW * RATIO_H) / RATIO_W }));
+    if (pointers.current.size === 2) {
+      const pts = Array.from(pointers.current.values());
+      const currentDist = dist(pts[0], pts[1]);
+      const currentMid = midpoint(pts[0], pts[1]);
+      const scaleFactor = gestureStart.current.dist > 0 ? currentDist / gestureStart.current.dist : 1;
+      const newZoom = Math.min(MAX_ZOOM, Math.max(1, gestureStart.current.zoom * scaleFactor));
+
+      const dx = currentMid.x - gestureStart.current.midpoint.x;
+      const dy = currentMid.y - gestureStart.current.midpoint.y;
+
+      setZoom(newZoom);
+      setOffset(clampOffset({ x: gestureStart.current.offset.x + dx, y: gestureStart.current.offset.y + dy }, newZoom));
+    } else if (pointers.current.size === 1) {
+      const pt = pointers.current.get(e.pointerId);
+      if (!pt) return;
+      const dx = pt.x - gestureStart.current.midpoint.x;
+      const dy = pt.y - gestureStart.current.midpoint.y;
+      setOffset(clampOffset({ x: gestureStart.current.offset.x + dx, y: gestureStart.current.offset.y + dy }, zoom));
     }
   }
 
-  function handlePointerUp() {
-    dragging.current = null;
+  function handlePointerUp(e: React.PointerEvent) {
+    pointers.current.delete(e.pointerId);
+    if (pointers.current.size >= 1) {
+      const remaining = Array.from(pointers.current.entries())[0];
+      gestureStart.current = {
+        zoom: zoom,
+        offset: offset,
+        dist: 0,
+        midpoint: { x: remaining[1].x, y: remaining[1].y },
+      };
+    }
+  }
+
+  function adjustZoom(delta: number) {
+    const newZoom = Math.min(MAX_ZOOM, Math.max(1, zoom + delta));
+    setZoom(newZoom);
+    setOffset(clampOffset(offset, newZoom));
+  }
+
+  function handleReset() {
+    const base = coverScale(viewport.width, viewport.height, natural.width, natural.height);
+    const displayW = natural.width * base;
+    const displayH = natural.height * base;
+    setZoom(1);
+    setOffset({ x: (viewport.width - displayW) / 2, y: (viewport.height - displayH) / 2 });
   }
 
   function resizeIfNeeded(sourceCanvas: HTMLCanvasElement) {
@@ -132,29 +188,17 @@ export default function ImageCropper(props: Props) {
     return outCanvas.toDataURL("image/jpeg", JPEG_QUALITY);
   }
 
-  function exportCrop(useFullFrame: boolean) {
+  function handleConfirm() {
     const img = imgRef.current;
-    if (!img || rendered.width === 0) return;
+    if (!img || viewport.width === 0) return;
 
-    const naturalW = img.naturalWidth;
-    const naturalH = img.naturalHeight;
-    const scale = naturalW / rendered.width;
+    const base = coverScale(viewport.width, viewport.height, natural.width, natural.height);
+    const renderScale = base * zoom;
 
-    let cropBox = box;
-    if (useFullFrame) {
-      let w = rendered.width;
-      let h = (w * RATIO_H) / RATIO_W;
-      if (h > rendered.height) {
-        h = rendered.height;
-        w = (h * RATIO_W) / RATIO_H;
-      }
-      cropBox = { x: (rendered.width - w) / 2, y: (rendered.height - h) / 2, w: w, h: h };
-    }
-
-    const sx = Math.round(cropBox.x * scale);
-    const sy = Math.round(cropBox.y * scale);
-    const sw = Math.round(cropBox.w * scale);
-    const sh = Math.round(cropBox.h * scale);
+    const sx = Math.round(-offset.x / renderScale);
+    const sy = Math.round(-offset.y / renderScale);
+    const sw = Math.round(viewport.width / renderScale);
+    const sh = Math.round(viewport.height / renderScale);
 
     const canvas = document.createElement("canvas");
     canvas.width = sw;
@@ -166,29 +210,26 @@ export default function ImageCropper(props: Props) {
     onConfirm(resizeIfNeeded(canvas));
   }
 
-  function handleConfirm() {
-    exportCrop(false);
-  }
-
-  function handleSkip() {
-    exportCrop(true);
-  }
-
-  function handleReset() {
-    fitInitialBox(rendered.width, rendered.height);
-  }
+  const base = coverScale(viewport.width, viewport.height, natural.width, natural.height);
+  const renderScale = base * zoom;
+  const displayW = natural.width * renderScale;
+  const displayH = natural.height * renderScale;
 
   return (
     <div className="flex flex-col gap-4">
       <p className="text-xs text-ink/60 -mb-1">
-        Drag inside the box to move it, or drag the corner handle to resize. The shape is locked to match how covers are displayed.
+        Drag the photo to reposition it. Pinch to zoom (or use the buttons below).
       </p>
 
       <div
-        className="relative select-none touch-none inline-block max-w-full"
+        ref={viewportRef}
+        className="relative overflow-hidden bg-ink/5 mx-auto touch-none select-none"
+        style={{ width: "100%", maxWidth: "320px", aspectRatio: RATIO_W + " / " + RATIO_H }}
+        onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
         onPointerLeave={handlePointerUp}
+        onPointerCancel={handlePointerUp}
       >
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
@@ -198,71 +239,43 @@ export default function ImageCropper(props: Props) {
           draggable={false}
           onLoad={handleImgLoad}
           style={{
-            maxWidth: "100%",
-            maxHeight: "420px",
-            width: "auto",
-            height: "auto",
-            display: "block",
+            position: "absolute",
+            left: offset.x + "px",
+            top: offset.y + "px",
+            width: displayW + "px",
+            height: displayH + "px",
+            maxWidth: "none",
+            pointerEvents: "none",
           }}
         />
-
-        {imgLoaded && (
-          <>
-            <div
-              className="absolute inset-0 pointer-events-none"
-              style={{
-                background: "rgba(43,38,32,0.5)",
-                clipPath:
-                  "polygon(0% 0%, 0% 100%, " +
-                  box.x +
-                  "px 100%, " +
-                  box.x +
-                  "px " +
-                  box.y +
-                  "px, " +
-                  (box.x + box.w) +
-                  "px " +
-                  box.y +
-                  "px, " +
-                  (box.x + box.w) +
-                  "px " +
-                  (box.y + box.h) +
-                  "px, " +
-                  box.x +
-                  "px " +
-                  (box.y + box.h) +
-                  "px, " +
-                  box.x +
-                  "px 100%, 100% 100%, 100% 0%)",
-              }}
-            />
-
-            <div
-              onPointerDown={startMove}
-              className="absolute border-2 border-forest cursor-move touch-none"
-              style={{ left: box.x, top: box.y, width: box.w, height: box.h }}
-            />
-
-            <div
-              onPointerDown={startResize}
-              className="absolute w-11 h-11 -ml-5.5 -mt-5.5 cursor-nwse-resize touch-none flex items-center justify-center"
-              style={{ left: box.x + box.w, top: box.y + box.h }}
-            >
-              <div className="w-5 h-5 bg-forest border-2 border-cream rounded-full pointer-events-none" />
-            </div>
-          </>
-        )}
       </div>
 
-      <div className="flex gap-3 flex-wrap">
+      <div className="flex items-center justify-center gap-3">
+        <button
+          type="button"
+          onClick={function () { adjustZoom(-0.2); }}
+          className="w-9 h-9 rounded-full border border-ink/25 text-ink/70 hover:border-ink transition-colors flex items-center justify-center font-mono text-lg leading-none"
+        >
+          &#8722;
+        </button>
+        <span className="font-mono text-[10px] uppercase tracking-widest text-ink/50 w-16 text-center">
+          {Math.round(zoom * 100)}%
+        </span>
+        <button
+          type="button"
+          onClick={function () { adjustZoom(0.2); }}
+          className="w-9 h-9 rounded-full border border-ink/25 text-ink/70 hover:border-ink transition-colors flex items-center justify-center font-mono text-lg leading-none"
+        >
+          +
+        </button>
+      </div>
+
+      <div className="flex gap-3 flex-wrap justify-center">
         <button type="button" onClick={handleReset} className="font-mono text-[11px] uppercase tracking-widest border border-ink/25 text-ink/70 rounded-full px-4 py-2 hover:border-ink transition-colors">
           Reset
         </button>
-        <button type="button" onClick={handleConfirm} className="font-mono text-[11px] uppercase tracking-widest bg-forest text-cream rounded-full px-4 py-2 hover:bg-forest-dark transition-colors">
+        <button type="button" onClick={handleConfirm} className="font-mono text-[11px] uppercase tracking-widest bg-forest text-cream rounded-full px-5 py-2 hover:bg-forest-dark transition-colors">
           Confirm crop
-        </button>
-        <button type="button" onClick={handleSkip} className="font-mono text-[11px] uppercase tracking-widest border border-ink/25 text-ink/70 rounded-full px-4 py-2 hover:border-ink transition-colors">
-          Use full photo
         </button>
       </div>
     </div>
