@@ -1,10 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import ImageCropper from "./ImageCropper";
 import Spinner from "@/components/Spinner";
 import Toast from "@/components/Toast";
 import { useCategories } from "@/lib/useCategories";
+import { resizeImageDataUrl } from "@/lib/resizeImage";
 
 const FIELD_KEYS = ["title", "author", "genre", "publish_date", "condition"];
 
@@ -14,10 +14,10 @@ export default function AdminBookForm(props: { password: string; onSaved: () => 
 
   const [fields, setFields] = useState<Record<string, string>>({});
   const [price, setPrice] = useState("");
-  const [frontRaw, setFrontRaw] = useState<string | null>(null);
-  const [frontCropped, setFrontCropped] = useState<string | null>(null);
-  const [backRaw, setBackRaw] = useState<string | null>(null);
-  const [backCropped, setBackCropped] = useState<string | null>(null);
+  const [front, setFront] = useState<string | null>(null);
+  const [back, setBack] = useState<string | null>(null);
+  const [processingFront, setProcessingFront] = useState(false);
+  const [processingBack, setProcessingBack] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [toastMessage, setToastMessage] = useState("");
@@ -33,17 +33,34 @@ export default function AdminBookForm(props: { password: string; onSaved: () => 
     });
   }
 
-  function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>, side: "front" | "back") {
+  function readFileAsDataUrl(file: File): Promise<string> {
+    return new Promise(function (resolve, reject) {
+      const reader = new FileReader();
+      reader.onload = function () { resolve(reader.result as string); };
+      reader.onerror = function () { reject(new Error("Could not read file.")); };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>, side: "front" | "back") {
     const files = e.target.files;
     if (!files || files.length === 0) return;
     const file = files[0];
-    const reader = new FileReader();
-    reader.onload = function () {
-      const dataUrl = reader.result as string;
-      if (side === "front") setFrontRaw(dataUrl);
-      else setBackRaw(dataUrl);
-    };
-    reader.readAsDataURL(file);
+
+    if (side === "front") setProcessingFront(true);
+    else setProcessingBack(true);
+
+    try {
+      const rawDataUrl = await readFileAsDataUrl(file);
+      const resized = await resizeImageDataUrl(rawDataUrl);
+      if (side === "front") setFront(resized);
+      else setBack(resized);
+    } catch (err) {
+      setError("Could not process that photo. Try a different one.");
+    } finally {
+      if (side === "front") setProcessingFront(false);
+      else setProcessingBack(false);
+    }
   }
 
   async function uploadToImageKit(dataUrl: string, fileName: string) {
@@ -82,14 +99,12 @@ export default function AdminBookForm(props: { password: string; onSaved: () => 
     setSaving(true);
     setError("");
     try {
-      const frontImage = frontCropped || frontRaw;
-      if (!frontImage) throw new Error("A front cover photo is required.");
+      if (!front) throw new Error("A front cover photo is required.");
 
-      const frontUrl = await uploadToImageKit(frontImage, "book-" + Date.now() + "-front.jpg");
-      const backImage = backCropped || backRaw;
+      const frontUrl = await uploadToImageKit(front, "book-" + Date.now() + "-front.jpg");
       let backUrl: string | null = null;
-      if (backImage) {
-        backUrl = await uploadToImageKit(backImage, "book-" + Date.now() + "-back.jpg");
+      if (back) {
+        backUrl = await uploadToImageKit(back, "book-" + Date.now() + "-back.jpg");
       }
 
       const item = Object.assign({}, fields, {
@@ -111,10 +126,8 @@ export default function AdminBookForm(props: { password: string; onSaved: () => 
 
       setFields({});
       setPrice("");
-      setFrontRaw(null);
-      setFrontCropped(null);
-      setBackRaw(null);
-      setBackCropped(null);
+      setFront(null);
+      setBack(null);
       onSaved();
     } catch (err: any) {
       setError(err.message || "Failed to save book.");
@@ -133,28 +146,21 @@ export default function AdminBookForm(props: { password: string; onSaved: () => 
           <label className="block font-mono text-[11px] uppercase tracking-widest text-ink/60 mb-2">
             Front cover
           </label>
-          {!frontRaw && (
+          {!front && !processingFront && (
             <input type="file" accept="image/*" onChange={function (e) { handleFileSelect(e, "front"); }} />
           )}
-          {frontRaw && !frontCropped && (
-            <ImageCropper
-              imageSrc={frontRaw}
-              onConfirm={setFrontCropped}
-              onSkip={function () { setFrontCropped(frontRaw); }}
-            />
+          {processingFront && (
+            <div className="flex items-center gap-2 text-ink/60 text-sm">
+              <Spinner /> Processing photo...
+            </div>
           )}
-          {frontCropped && (
+          {front && (
             <div>
               {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src={frontCropped} alt="Front preview" className="max-h-48 rounded-card border border-ink/15 mb-2" />
-              <div className="flex gap-2 flex-wrap">
-                <button type="button" onClick={function () { setFrontCropped(null); }} className="font-mono text-[10px] uppercase tracking-widest border border-ink/25 text-ink/70 rounded-full px-3 py-1.5 hover:border-ink transition-colors">
-                  Re-crop
-                </button>
-                <button type="button" onClick={function () { setFrontRaw(null); setFrontCropped(null); }} className="font-mono text-[10px] uppercase tracking-widest border border-ink/25 text-ink/70 rounded-full px-3 py-1.5 hover:border-ink transition-colors">
-                  Replace photo
-                </button>
-              </div>
+              <img src={front} alt="Front preview" className="max-h-48 rounded-card border border-ink/15 mb-2" />
+              <button type="button" onClick={function () { setFront(null); }} className="font-mono text-[10px] uppercase tracking-widest border border-ink/25 text-ink/70 rounded-full px-3 py-1.5 hover:border-ink transition-colors">
+                Replace photo
+              </button>
             </div>
           )}
         </div>
@@ -163,28 +169,21 @@ export default function AdminBookForm(props: { password: string; onSaved: () => 
           <label className="block font-mono text-[11px] uppercase tracking-widest text-ink/60 mb-2">
             Back cover (optional)
           </label>
-          {!backRaw && (
+          {!back && !processingBack && (
             <input type="file" accept="image/*" onChange={function (e) { handleFileSelect(e, "back"); }} />
           )}
-          {backRaw && !backCropped && (
-            <ImageCropper
-              imageSrc={backRaw}
-              onConfirm={setBackCropped}
-              onSkip={function () { setBackCropped(backRaw); }}
-            />
+          {processingBack && (
+            <div className="flex items-center gap-2 text-ink/60 text-sm">
+              <Spinner /> Processing photo...
+            </div>
           )}
-          {backCropped && (
+          {back && (
             <div>
               {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src={backCropped} alt="Back preview" className="max-h-48 rounded-card border border-ink/15 mb-2" />
-              <div className="flex gap-2 flex-wrap">
-                <button type="button" onClick={function () { setBackCropped(null); }} className="font-mono text-[10px] uppercase tracking-widest border border-ink/25 text-ink/70 rounded-full px-3 py-1.5 hover:border-ink transition-colors">
-                  Re-crop
-                </button>
-                <button type="button" onClick={function () { setBackRaw(null); setBackCropped(null); }} className="font-mono text-[10px] uppercase tracking-widest border border-ink/25 text-ink/70 rounded-full px-3 py-1.5 hover:border-ink transition-colors">
-                  Replace photo
-                </button>
-              </div>
+              <img src={back} alt="Back preview" className="max-h-48 rounded-card border border-ink/15 mb-2" />
+              <button type="button" onClick={function () { setBack(null); }} className="font-mono text-[10px] uppercase tracking-widest border border-ink/25 text-ink/70 rounded-full px-3 py-1.5 hover:border-ink transition-colors">
+                Replace photo
+              </button>
             </div>
           )}
         </div>
